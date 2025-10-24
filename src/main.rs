@@ -10,10 +10,15 @@ use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::command_buffer::allocator::{
     StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
 };
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyBufferInfo,
+    CopyImageToBufferInfo,
+};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{self, Device};
+use vulkano::format::{ClearColorValue, Format};
+use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
@@ -21,6 +26,8 @@ use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineL
 use vulkano::pipeline::{ComputePipeline, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 use vulkano::sync::{self, GpuFuture};
+
+use image::{ImageBuffer, Rgba};
 
 mod error;
 pub use error::Result;
@@ -106,61 +113,36 @@ fn compute_pipeline() -> Result<()> {
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
-    let data_iter = 0..65536u32;
-    let data_buffer = Buffer::from_iter(
+    let image_size = [1920, 1080, 1];
+    let image = Image::new(
         memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER,
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: Format::R16G16B16A16_UNORM,
+            extent: image_size,
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::TRANSFER_SRC,
             ..Default::default()
         },
         AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
             ..Default::default()
         },
-        data_iter,
+    )?;
+
+    let buf = Buffer::from_iter(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            ..Default::default()
+        },
+        (0..image_size.iter().product::<u32>() * 4).map(|_| 0u16),
     )
     .expect("failed to create buffer");
-    mod cs {
-        vulkano_shaders::shader! {
-            ty: "compute",
-            path: "./shader/mul114514",
-        }
-    }
-    let shader = cs::load(device.clone()).expect("failed to create shader module");
-    let cs = shader.entry_point("main").unwrap();
-    let stage = PipelineShaderStageCreateInfo::new(cs);
-    let layout = PipelineLayout::new(
-        device.clone(),
-        PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
-            .into_pipeline_layout_create_info(device.clone())
-            .unwrap(),
-    )?;
-    let compute_pipeline = ComputePipeline::new(
-        device.clone(),
-        None,
-        ComputePipelineCreateInfo::stage_layout(stage, layout),
-    )
-    .expect("failed to create compute pipeline");
-
-    let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
-        device.clone(),
-        Default::default(),
-    ));
-
-    let pipeline_layout = compute_pipeline.layout();
-    let descriptor_set_layouts = pipeline_layout.set_layouts();
-
-    let descriptor_set_layout_index = 0;
-    let descriptor_set_layout = descriptor_set_layouts
-        .get(descriptor_set_layout_index)
-        .unwrap();
-    let descriptor_set = DescriptorSet::new(
-        descriptor_set_allocator,
-        descriptor_set_layout.clone(),
-        [WriteDescriptorSet::buffer(0, data_buffer.clone())], // 0 is the binding
-        [],
-    )?;
 
     let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
         device.clone(),
@@ -172,34 +154,27 @@ fn compute_pipeline() -> Result<()> {
         CommandBufferUsage::OneTimeSubmit,
     )?;
 
-    let work_group_counts = [1024, 1, 1];
-
-    unsafe {
-        command_buffer_builder
-            .bind_pipeline_compute(compute_pipeline.clone())?
-            .bind_descriptor_sets(
-                PipelineBindPoint::Compute,
-                compute_pipeline.layout().clone(),
-                descriptor_set_layout_index as u32,
-                descriptor_set,
-            )?
-            .dispatch(work_group_counts)?
-    };
+    command_buffer_builder
+        .clear_color_image(ClearColorImageInfo {
+            clear_value: ClearColorValue::Float([137. / 256., 100. / 256., 204. / 256., 0.5]),
+            ..ClearColorImageInfo::image(image.clone())
+        })?
+        .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+            image.clone(),
+            buf.clone(),
+        ))?;
 
     let command_buffer = command_buffer_builder.build()?;
 
     let future = sync::now(device.clone())
-        .then_execute(queue.clone(), command_buffer)
-        .unwrap()
-        .then_signal_fence_and_flush()
-        .unwrap();
-    future.wait(None).unwrap();
-    let content = data_buffer.read().unwrap();
-    for (n, val) in content.iter().enumerate() {
-        assert_eq!(*val, (n as u32).wrapping_mul(114514));
-    }
+        .then_execute(queue.clone(), command_buffer)?
+        .then_signal_fence_and_flush()?;
 
-    println!("Everything succeeded!");
-
+    future.wait(None)?;
+    let buffer_content = buf.read()?;
+    let image =
+        ImageBuffer::<Rgba<u16>, _>::from_raw(image_size[0], image_size[1], &buffer_content[..])
+            .unwrap();
+    image.save("image.tif")?;
     Ok(())
 }
