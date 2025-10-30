@@ -7,4 +7,6 @@ edition = "2024"
 winit = { version = "*" }
 vulkano = { version = "*" }
 vulkano-shaders = { version = "*" }
-image = { version = "*" }
+# image = { version = "*" }
+log = "*"
+env_logger = "*"
