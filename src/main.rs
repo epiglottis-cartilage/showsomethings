@@ -23,7 +23,7 @@ use vulkano::{
         graphics::{
             GraphicsPipelineCreateInfo,
             color_blend::{ColorBlendAttachmentState, ColorBlendState},
-            input_assembly::InputAssemblyState,
+            input_assembly::{InputAssemblyState, PrimitiveTopology},
             multisample::MultisampleState,
             rasterization::RasterizationState,
             vertex_input::{Vertex, VertexDefinition},
@@ -38,6 +38,7 @@ use vulkano::{
 };
 use winit::{
     application::ApplicationHandler,
+    dpi::LogicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::Window,
@@ -71,7 +72,9 @@ impl ApplicationHandler for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("ShowSomething")
-                        .with_transparent(true),
+                        .with_transparent(true)
+                        // .with_resizable(false)
+                        .with_inner_size(LogicalSize::new(720, 720)),
                 )
                 .log()
                 .unwrap(),
@@ -96,9 +99,11 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(_) => {
+                log::info!("Resized");
                 self.window_resize = true;
             }
             WindowEvent::RedrawRequested => {
+                log::info!("Redraw requested");
                 self.renderer
                     .as_mut()
                     .unwrap()
@@ -113,7 +118,7 @@ impl ApplicationHandler for App {
         }
     }
 }
-#[allow(dead_code)]
+// #[allow(dead_code)]
 struct RendererContext {
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -167,7 +172,7 @@ impl RendererContext {
         let surface = Surface::from_window(instance.clone(), window.clone()).log()?;
 
         let (physical_device, queue_family_index) =
-            select_physical_device(&instance, &surface, &device_extensions)?;
+            Self::select_physical_device(&instance, &surface, &device_extensions)?;
 
         let (device, mut queues) = Device::new(
             physical_device.clone(),
@@ -213,14 +218,15 @@ impl RendererContext {
                     image_extent: dimensions.into(),
                     image_usage: ImageUsage::COLOR_ATTACHMENT,
                     composite_alpha,
+                    present_mode: swapchain::PresentMode::Fifo,
                     ..Default::default()
                 },
             )
             .log()?
         };
 
-        let render_pass = get_render_pass(device.clone(), swapchain.clone())?;
-        let framebuffers = get_framebuffers(&images, render_pass.clone())?;
+        let render_pass = Self::get_render_pass(device.clone(), swapchain.clone())?;
+        let framebuffers = Self::get_framebuffers(&images, render_pass.clone())?;
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
@@ -237,22 +243,29 @@ impl RendererContext {
             },
             [
                 Vertex2D {
-                    position: [-0.5, -0.5],
+                    position: [-0.8, -0.8],
                 },
                 Vertex2D {
-                    position: [0., 0.5],
+                    position: [-0.8, 0.8],
                 },
                 Vertex2D {
-                    position: [0.5, 0.],
+                    position: [0.8, -0.8],
                 },
                 Vertex2D {
-                    position: [-1.3, -1.3],
+                    position: [0.8, 0.8],
+                },
+                Vertex2D::NONE,
+                Vertex2D {
+                    position: [1.0, 1.0],
                 },
                 Vertex2D {
-                    position: [-0.8, -0.6],
+                    position: [-0.5, 0.5],
                 },
                 Vertex2D {
-                    position: [-0.6, -0.8],
+                    position: [0.5, -0.5],
+                },
+                Vertex2D {
+                    position: [-1.0, -1.0],
                 },
             ],
         )
@@ -266,7 +279,7 @@ impl RendererContext {
 
         let vs = shader::vs::load(device.clone()).log()?;
         let fs = shader::fs::load(device.clone()).log()?;
-        let pipeline = get_pipeline(
+        let pipeline = Self::get_pipeline(
             device.clone(),
             vs.clone(),
             fs.clone(),
@@ -278,7 +291,7 @@ impl RendererContext {
             device.clone(),
             Default::default(),
         ));
-        let command_buffers = get_command_buffers(
+        let command_buffers = Self::get_command_buffers(
             &command_buffer_allocator,
             &queue,
             &pipeline,
@@ -322,19 +335,19 @@ impl RendererContext {
                 .log()?;
 
             self.swapchain = new_swapchain;
-            let new_framebuffers = get_framebuffers(&new_images, self.render_pass.clone())?;
+            let new_framebuffers = Self::get_framebuffers(&new_images, self.render_pass.clone())?;
 
             if *winodw_resize {
                 *winodw_resize = false;
                 self.viewport.extent = new_dimensions.into();
-                let new_pipeline = get_pipeline(
+                let new_pipeline = Self::get_pipeline(
                     self.device.clone(),
                     self.vs.clone(),
                     self.fs.clone(),
                     self.render_pass.clone(),
                     self.viewport.clone(),
                 )?;
-                self.command_buffers = get_command_buffers(
+                self.command_buffers = Self::get_command_buffers(
                     &self.command_buffer_allocator,
                     &self.queue,
                     &new_pipeline,
@@ -404,174 +417,176 @@ impl RendererContext {
         }
         Ok(())
     }
-}
 
-pub fn select_physical_device(
-    instance: &Arc<Instance>,
-    surface: &Arc<Surface>,
-    device_extensions: &DeviceExtensions,
-) -> Result<(Arc<PhysicalDevice>, u32)> {
-    use vulkano::device::QueueFlags;
-    use vulkano::device::physical::PhysicalDeviceType;
+    pub fn select_physical_device(
+        instance: &Arc<Instance>,
+        surface: &Arc<Surface>,
+        device_extensions: &DeviceExtensions,
+    ) -> Result<(Arc<PhysicalDevice>, u32)> {
+        use vulkano::device::QueueFlags;
+        use vulkano::device::physical::PhysicalDeviceType;
 
-    instance
-        .enumerate_physical_devices()
-        .log()?
-        .filter(|p| p.supported_extensions().contains(device_extensions))
-        .filter_map(|p| {
-            p.queue_family_properties()
-                .iter()
-                .enumerate()
-                .position(|(i, q)| {
-                    q.queue_flags.contains(QueueFlags::GRAPHICS)
-                        && p.surface_support(i as u32, surface).unwrap_or(false)
-                })
-                .map(|q| (p, q as u32))
-        })
-        .min_by_key(|(p, _)| match p.properties().device_type {
-            PhysicalDeviceType::DiscreteGpu => 0,
-            PhysicalDeviceType::IntegratedGpu => 1,
-            PhysicalDeviceType::VirtualGpu => 2,
-            PhysicalDeviceType::Cpu => 3,
-            _ => 4,
-        })
-        .log()
-}
-
-fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain>) -> Result<Arc<RenderPass>> {
-    vulkano::single_pass_renderpass!(
-        device,
-        attachments: {
-            color: {
-                format: swapchain.image_format(), // set the format the same as the swapchain
-                samples: 1,
-                load_op: Clear,
-                store_op: Store,
-            },
-        },
-        pass: {
-            color: [color],
-            depth_stencil: {},
-        },
-    )
-    .log()
-    .map_err(Into::into)
-}
-
-fn get_framebuffers(
-    images: &[Arc<Image>],
-    render_pass: Arc<RenderPass>,
-) -> Result<Vec<Arc<Framebuffer>>> {
-    images
-        .iter()
-        .map(|image| {
-            let view = ImageView::new_default(image.clone()).unwrap();
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![view],
-                    ..Default::default()
-                },
-            )
+        instance
+            .enumerate_physical_devices()
+            .log()?
+            .filter(|p| p.supported_extensions().contains(device_extensions))
+            .filter_map(|p| {
+                p.queue_family_properties()
+                    .iter()
+                    .enumerate()
+                    .position(|(i, q)| {
+                        q.queue_flags.contains(QueueFlags::GRAPHICS)
+                            && p.surface_support(i as u32, surface).unwrap_or(false)
+                    })
+                    .map(|q| (p, q as u32))
+            })
+            .min_by_key(|(p, _)| match p.properties().device_type {
+                PhysicalDeviceType::DiscreteGpu => 0,
+                PhysicalDeviceType::IntegratedGpu => 1,
+                PhysicalDeviceType::VirtualGpu => 2,
+                PhysicalDeviceType::Cpu => 3,
+                _ => 4,
+            })
             .log()
-        })
-        .try_collect()
+    }
+
+    fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain>) -> Result<Arc<RenderPass>> {
+        vulkano::single_pass_renderpass!(
+            device,
+            attachments: {
+                color: {
+                    format: swapchain.image_format(), // set the format the same as the swapchain
+                    samples: 1,
+                    load_op: Clear,
+                    store_op: Store,
+                },
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {},
+            },
+        )
+        .log()
         .map_err(Into::into)
-}
+    }
 
-fn get_pipeline(
-    device: Arc<Device>,
-    vs: Arc<ShaderModule>,
-    fs: Arc<ShaderModule>,
-    render_pass: Arc<RenderPass>,
-    viewport: Viewport,
-) -> Result<Arc<GraphicsPipeline>> {
-    let vs = vs.entry_point("main").log()?;
-    let fs = fs.entry_point("main").log()?;
+    fn get_framebuffers(
+        images: &[Arc<Image>],
+        render_pass: Arc<RenderPass>,
+    ) -> Result<Vec<Arc<Framebuffer>>> {
+        images
+            .iter()
+            .map(|image| {
+                let view = ImageView::new_default(image.clone()).unwrap();
+                Framebuffer::new(
+                    render_pass.clone(),
+                    FramebufferCreateInfo {
+                        attachments: vec![view],
+                        ..Default::default()
+                    },
+                )
+                .log()
+            })
+            .try_collect()
+            .map_err(Into::into)
+    }
 
-    let vertex_input_state = Vertex2D::per_vertex().definition(&vs).unwrap();
+    fn get_pipeline(
+        device: Arc<Device>,
+        vs: Arc<ShaderModule>,
+        fs: Arc<ShaderModule>,
+        render_pass: Arc<RenderPass>,
+        viewport: Viewport,
+    ) -> Result<Arc<GraphicsPipeline>> {
+        let vs = vs.entry_point("main").log()?;
+        let fs = fs.entry_point("main").log()?;
 
-    let stages = [
-        PipelineShaderStageCreateInfo::new(vs),
-        PipelineShaderStageCreateInfo::new(fs),
-    ];
+        let vertex_input_state = Vertex2D::per_vertex().definition(&vs).unwrap();
 
-    let layout = PipelineLayout::new(
-        device.clone(),
-        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-            .into_pipeline_layout_create_info(device.clone())
-            .log()?,
-    )?;
+        let stages = [
+            PipelineShaderStageCreateInfo::new(vs),
+            PipelineShaderStageCreateInfo::new(fs),
+        ];
 
-    let subpass = Subpass::from(render_pass.clone(), 0).log()?;
+        let layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+                .into_pipeline_layout_create_info(device.clone())
+                .log()?,
+        )?;
 
-    GraphicsPipeline::new(
-        device.clone(),
-        None,
-        GraphicsPipelineCreateInfo {
-            stages: stages.into_iter().collect(),
-            vertex_input_state: Some(vertex_input_state),
-            input_assembly_state: Some(InputAssemblyState::default()),
-            viewport_state: Some(ViewportState {
-                viewports: [viewport].into_iter().collect(),
-                ..Default::default()
-            }),
-            rasterization_state: Some(RasterizationState::default()),
-            multisample_state: Some(MultisampleState::default()),
-            color_blend_state: Some(ColorBlendState::with_attachment_states(
-                subpass.num_color_attachments(),
-                ColorBlendAttachmentState::default(),
-            )),
-            subpass: Some(subpass.into()),
-            ..GraphicsPipelineCreateInfo::layout(layout)
-        },
-    )
-    .map_err(Into::into)
-}
+        let subpass = Subpass::from(render_pass.clone(), 0).log()?;
 
-fn get_command_buffers(
-    command_buffer_allocator: &Arc<StandardCommandBufferAllocator>,
-    queue: &Arc<device::Queue>,
-    pipeline: &Arc<GraphicsPipeline>,
-    framebuffers: &[Arc<Framebuffer>],
-    vertex_buffer: &Subbuffer<[Vertex2D]>,
-) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
-    framebuffers
-        .iter()
-        .map(|framebuffer| {
-            let mut builder = AutoCommandBufferBuilder::primary(
-                command_buffer_allocator.clone(),
-                queue.queue_family_index(),
-                CommandBufferUsage::MultipleSubmit,
-            )
-            .unwrap();
+        GraphicsPipeline::new(
+            device.clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                stages: stages.into_iter().collect(),
+                vertex_input_state: Some(vertex_input_state),
+                input_assembly_state: Some(InputAssemblyState {
+                    topology: PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                }),
+                viewport_state: Some(ViewportState {
+                    viewports: [viewport].into_iter().collect(),
+                    ..Default::default()
+                }),
+                rasterization_state: Some(RasterizationState::default()),
+                multisample_state: Some(MultisampleState::default()),
+                color_blend_state: Some(ColorBlendState::with_attachment_states(
+                    subpass.num_color_attachments(),
+                    ColorBlendAttachmentState::default(),
+                )),
+                subpass: Some(subpass.into()),
+                ..GraphicsPipelineCreateInfo::layout(layout)
+            },
+        )
+        .map_err(Into::into)
+    }
 
-            unsafe {
-                builder
-                    .begin_render_pass(
-                        RenderPassBeginInfo {
-                            clear_values: vec![Some([1.0, 1.0, 1.0, 0.1].into())],
-                            ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
-                        },
-                        SubpassBeginInfo {
-                            contents: SubpassContents::Inline,
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap()
-                    .bind_pipeline_graphics(pipeline.clone())
-                    .unwrap()
-                    .bind_vertex_buffers(0, vertex_buffer.clone())
-                    .unwrap()
-                    .draw(vertex_buffer.len() as u32, 1, 0, 0)
-                    .unwrap()
-                    .end_render_pass(Default::default())
-                    .unwrap()
-            };
+    fn get_command_buffers(
+        command_buffer_allocator: &Arc<StandardCommandBufferAllocator>,
+        queue: &Arc<device::Queue>,
+        pipeline: &Arc<GraphicsPipeline>,
+        framebuffers: &[Arc<Framebuffer>],
+        vertex_buffer: &Subbuffer<[Vertex2D]>,
+    ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
+        framebuffers
+            .iter()
+            .map(|framebuffer| {
+                let mut builder = AutoCommandBufferBuilder::primary(
+                    command_buffer_allocator.clone(),
+                    queue.queue_family_index(),
+                    CommandBufferUsage::MultipleSubmit,
+                )
+                .unwrap();
 
-            builder.build().unwrap()
-        })
-        .collect()
+                unsafe {
+                    builder
+                        .begin_render_pass(
+                            RenderPassBeginInfo {
+                                clear_values: vec![Some([1.0, 1.0, 1.0, 0.0].into())],
+                                ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                            },
+                            SubpassBeginInfo {
+                                contents: SubpassContents::Inline,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap()
+                        .bind_pipeline_graphics(pipeline.clone())
+                        .unwrap()
+                        .bind_vertex_buffers(0, vertex_buffer.clone())
+                        .unwrap()
+                        .draw(vertex_buffer.len() as u32, 1, 0, 0)
+                        .unwrap()
+                        .end_render_pass(Default::default())
+                        .unwrap()
+                };
+                builder.build().unwrap()
+            })
+            .collect()
+    }
 }
 
 #[derive(BufferContents, Vertex)]
@@ -579,4 +594,21 @@ fn get_command_buffers(
 struct Vertex2D {
     #[format(R32G32_SFLOAT)]
     position: [f32; 2],
+}
+impl Vertex2D {
+    const NONE: Self = Self {
+        position: unsafe { std::mem::transmute([-1i32; 2]) },
+    };
+}
+
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct Vertex3D {
+    #[format(R32G32B32_SFLOAT)]
+    position: [f32; 3],
+}
+impl Vertex3D {
+    const NONE: Self = Self {
+        position: unsafe { std::mem::transmute([-1i32; 3]) },
+    };
 }
