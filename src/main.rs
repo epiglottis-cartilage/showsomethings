@@ -1,6 +1,6 @@
-#![feature(try_trait_v2)]
-#![feature(impl_trait_in_bindings)]
 #![feature(iterator_try_collect)]
+#![feature(lazy_type_alias)]
+#![allow(incomplete_features)]
 use std::sync::Arc;
 
 use vulkano::{
@@ -118,7 +118,7 @@ impl ApplicationHandler for App {
         }
     }
 }
-// #[allow(dead_code)]
+#[allow(dead_code)]
 struct RendererContext {
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -126,7 +126,7 @@ struct RendererContext {
     render_pass: Arc<RenderPass>,
     swapchain: Arc<Swapchain>,
     framebuffers: Vec<Arc<Framebuffer>>,
-    vertex_buffer: Subbuffer<[Vertex2D]>,
+    vertex_buffer: Subbuffer<[Vertex3D]>,
     viewport: Viewport,
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
@@ -242,30 +242,14 @@ impl RendererContext {
                 ..Default::default()
             },
             [
-                Vertex2D {
-                    position: [-0.8, -0.8],
+                Vertex3D {
+                    position: [0.0, 1.0, 0.0],
                 },
-                Vertex2D {
-                    position: [-0.8, 0.8],
+                Vertex3D {
+                    position: [-1.0, -1.0, 0.0],
                 },
-                Vertex2D {
-                    position: [0.8, -0.8],
-                },
-                Vertex2D {
-                    position: [0.8, 0.8],
-                },
-                Vertex2D::NONE,
-                Vertex2D {
-                    position: [1.0, 1.0],
-                },
-                Vertex2D {
-                    position: [-0.5, 0.5],
-                },
-                Vertex2D {
-                    position: [0.5, -0.5],
-                },
-                Vertex2D {
-                    position: [-1.0, -1.0],
+                Vertex3D {
+                    position: [1.0, -1.0, 0.0],
                 },
             ],
         )
@@ -279,13 +263,15 @@ impl RendererContext {
 
         let vs = shader::vs::load(device.clone()).log()?;
         let fs = shader::fs::load(device.clone()).log()?;
+
         let pipeline = Self::get_pipeline(
             device.clone(),
             vs.clone(),
             fs.clone(),
             render_pass.clone(),
             viewport.clone(),
-        )?;
+        )
+        .log()?;
 
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
@@ -501,7 +487,7 @@ impl RendererContext {
         let vs = vs.entry_point("main").log()?;
         let fs = fs.entry_point("main").log()?;
 
-        let vertex_input_state = Vertex2D::per_vertex().definition(&vs).unwrap();
+        let vertex_input_state = Vertex3D::per_vertex().definition(&vs).unwrap();
 
         let stages = [
             PipelineShaderStageCreateInfo::new(vs),
@@ -513,11 +499,12 @@ impl RendererContext {
             PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
                 .into_pipeline_layout_create_info(device.clone())
                 .log()?,
-        )?;
+        )
+        .log()?;
 
         let subpass = Subpass::from(render_pass.clone(), 0).log()?;
 
-        GraphicsPipeline::new(
+        let pipeline = GraphicsPipeline::new(
             device.clone(),
             None,
             GraphicsPipelineCreateInfo {
@@ -541,7 +528,8 @@ impl RendererContext {
                 ..GraphicsPipelineCreateInfo::layout(layout)
             },
         )
-        .map_err(Into::into)
+        .log()?;
+        Ok(pipeline)
     }
 
     fn get_command_buffers(
@@ -549,7 +537,7 @@ impl RendererContext {
         queue: &Arc<device::Queue>,
         pipeline: &Arc<GraphicsPipeline>,
         framebuffers: &[Arc<Framebuffer>],
-        vertex_buffer: &Subbuffer<[Vertex2D]>,
+        vertex_buffer: &Subbuffer<[Vertex3D]>,
     ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
         framebuffers
             .iter()
@@ -596,6 +584,7 @@ struct Vertex2D {
     position: [f32; 2],
 }
 impl Vertex2D {
+    #[allow(unused)]
     const NONE: Self = Self {
         position: unsafe { std::mem::transmute([-1i32; 2]) },
     };
@@ -608,6 +597,7 @@ struct Vertex3D {
     position: [f32; 3],
 }
 impl Vertex3D {
+    #[allow(unused)]
     const NONE: Self = Self {
         position: unsafe { std::mem::transmute([-1i32; 3]) },
     };
