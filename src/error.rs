@@ -1,42 +1,47 @@
-pub type Result<T, E: core::fmt::Debug = Box<dyn core::error::Error>> = core::result::Result<T, E>;
+pub type Result<T, E: core::fmt::Display = Box<dyn core::error::Error>> =
+    core::result::Result<T, E>;
 
-// impl core::error::Error for Err {}
-
-#[allow(dead_code)]
-pub trait ErrorLogger<T> {
-    fn log(self) -> core::result::Result<T, Box<dyn core::error::Error>>;
+pub trait ErrorLogger {
+    type Output;
+    type Error;
+    fn log(self) -> core::result::Result<Self::Output, Self::Error>;
 }
-impl<T, E: core::fmt::Debug + core::fmt::Display> ErrorLogger<T> for core::result::Result<T, E> {
-    fn log(self) -> Result<T> {
-        match self {
-            Ok(x) => {
-                log::trace!("succ get {}", std::any::type_name::<T>());
-                Ok(x)
+
+impl<T, E: core::fmt::Display> ErrorLogger for core::result::Result<T, E> {
+    type Output = T;
+    type Error = E;
+    fn log(self) -> Self {
+        match &self {
+            Ok(_) => {
+                #[cfg(debug_assertions)]
+                log::trace!("succ: {}", std::any::type_name::<T>());
             }
             Err(e) => {
-                log::error!("fail get {}\n{}", std::any::type_name::<T>(), &e);
+                log::error!("fail {} because: {}", std::any::type_name::<T>(), e);
                 #[cfg(debug_assertions)]
-                panic!("Aborted due to error: {:?}", e);
-                #[cfg(not(debug_assertions))]
-                Err(e.into())
+                panic!()
             }
         }
+        self
     }
 }
-impl<T> ErrorLogger<T> for core::option::Option<T> {
-    fn log(self) -> Result<T> {
-        match self {
-            Some(x) => {
-                log::trace!("succ get {}", std::any::type_name::<T>());
-                Ok(x)
+
+// 为 Option 实现
+impl<T> ErrorLogger for core::option::Option<T> {
+    type Output = T;
+    type Error = Box<dyn core::error::Error>;
+    fn log(self) -> core::result::Result<Self::Output, Self::Error> {
+        match &self {
+            Some(_) => {
+                #[cfg(debug_assertions)]
+                log::trace!("succ: {}", std::any::type_name::<T>());
             }
             None => {
-                log::error!("fail get {}", std::any::type_name::<T>());
+                log::error!("fail {} bacuse: None", std::any::type_name::<T>());
                 #[cfg(debug_assertions)]
-                panic!("None");
-                #[cfg(not(debug_assertions))]
-                Err(String::from("None").into())
+                panic!()
             }
         }
+        self.ok_or(String::from("None").into())
     }
 }

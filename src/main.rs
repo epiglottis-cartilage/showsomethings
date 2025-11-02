@@ -4,7 +4,6 @@
 use glam::{Mat4, vec3};
 use std::sync::Arc;
 use std::time;
-use vulkano::pipeline::PipelineBindPoint;
 use vulkano::{
     Validated, VulkanError, VulkanLibrary,
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
@@ -25,12 +24,19 @@ use vulkano::{
         physical::PhysicalDevice,
     },
     image::{Image, ImageUsage, view::ImageView},
-    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
+    instance::{
+        Instance, InstanceCreateFlags, InstanceCreateInfo,
+        debug::{
+            DebugUtilsMessageSeverity, DebugUtilsMessenger, DebugUtilsMessengerCallback,
+            DebugUtilsMessengerCreateInfo,
+        },
+    },
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
     },
     pipeline::{
-        GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
+        GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        PipelineShaderStageCreateInfo,
         graphics::{
             GraphicsPipelineCreateInfo,
             color_blend::{ColorBlendAttachmentState, ColorBlendState},
@@ -119,11 +125,10 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(_) => {
-                log::info!("Resized");
+                log::trace!("Resized");
                 self.renderer.as_mut().unwrap().window_resize = true;
             }
             WindowEvent::RedrawRequested => {
-                log::info!("Redraw requested");
                 self.renderer
                     .as_mut()
                     .unwrap()
@@ -177,12 +182,13 @@ struct RendererContext {
     world: Mat4,
     view: Mat4,
     proj: Mat4,
+    _debug_handle: DebugUtilsMessenger,
 }
 impl RendererContext {
     fn new_with(event_loop: &ActiveEventLoop, window: Arc<Window>) -> Result<Self> {
         let library = VulkanLibrary::new().log()?;
-        let enabled_extensions = Surface::required_extensions(event_loop).log()?;
-
+        let mut enabled_extensions = Surface::required_extensions(event_loop).log()?;
+        enabled_extensions.ext_debug_utils = true;
         let instance = Instance::new(
             library,
             InstanceCreateInfo {
@@ -190,6 +196,28 @@ impl RendererContext {
                 enabled_extensions,
                 ..Default::default()
             },
+        )
+        .log()?;
+
+        let debug_handle = DebugUtilsMessenger::new(
+            instance.clone(),
+            DebugUtilsMessengerCreateInfo::user_callback(unsafe {
+                DebugUtilsMessengerCallback::new(|severity, r#type, data| match severity {
+                    DebugUtilsMessageSeverity::ERROR => {
+                        log::error!("{:?}-{:?}", r#type, data.message)
+                    }
+                    DebugUtilsMessageSeverity::WARNING => {
+                        log::warn!("{:?}-{:?}", r#type, data.message)
+                    }
+                    DebugUtilsMessageSeverity::INFO => {
+                        log::info!("{:?}-{:?}", r#type, data.message)
+                    }
+                    DebugUtilsMessageSeverity::VERBOSE => {
+                        log::debug!("{:?}-{:?}", r#type, data.message)
+                    }
+                    _ => unreachable!(),
+                })
+            }),
         )
         .log()?;
 
@@ -385,10 +413,11 @@ impl RendererContext {
             swapchain_recreate: false,
             window_resize: false,
             start_time: time::Instant::now(),
+            _debug_handle: debug_handle,
         })
     }
     fn update(&mut self, window: &Arc<Window>) -> Result<()> {
-        log::info!("update");
+        log::trace!("Rendering new frame");
         if self.swapchain_recreate || self.window_resize {
             self.swapchain_recreate = false;
             let new_dimensions = window.inner_size();
@@ -678,6 +707,7 @@ impl RendererContext {
             })
             .try_collect()
             .log()
+            .map_err(Into::into)
     }
 }
 

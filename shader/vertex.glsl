@@ -10,12 +10,12 @@ layout(set = 0, binding = 0) uniform Data {
     mat4 proj;
 } uniforms;
 
-layout(location = 2) out vec3 position_;
+layout(location = 2) out vec3 position_out;
 
 void main() {
     mat4 worldview = uniforms.view * uniforms.world;
     // v_normal = transpose(inverse(mat3(worldview))) * normal;
     gl_Position = uniforms.proj * worldview * vec4(position, 1.0);
-    position_ = gl_Position.xyz;
-    // gl_Position = vec4(position, 1.0);
+    position_out = gl_Position.xyz;
+    // gl_Position = vec4(position_raw, 1.0);
 }
