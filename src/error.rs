@@ -4,6 +4,7 @@ pub type Result<T, E: core::fmt::Display = Box<dyn core::error::Error>> =
 pub trait ErrorLogger {
     type Output;
     type Error;
+    #[inline(always)]
     fn log(self) -> core::result::Result<Self::Output, Self::Error>;
 }
 
@@ -26,7 +27,6 @@ impl<T, E: core::fmt::Display> ErrorLogger for core::result::Result<T, E> {
     }
 }
 
-// 为 Option 实现
 impl<T> ErrorLogger for core::option::Option<T> {
     type Output = T;
     type Error = Box<dyn core::error::Error>;
