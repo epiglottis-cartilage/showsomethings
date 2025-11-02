@@ -10,3 +10,4 @@ vulkano-shaders = { version = "*" }
 # image = { version = "*" }
 log = "*"
 env_logger = "*"
+glam = "*"

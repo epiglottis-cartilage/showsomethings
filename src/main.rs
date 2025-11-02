@@ -1,25 +1,36 @@
 #![feature(iterator_try_collect)]
 #![feature(lazy_type_alias)]
 #![allow(incomplete_features)]
+use glam::{Mat4, vec3};
 use std::sync::Arc;
-
+use std::time;
+use vulkano::pipeline::PipelineBindPoint;
 use vulkano::{
     Validated, VulkanError, VulkanLibrary,
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
         RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
-        allocator::StandardCommandBufferAllocator,
+        allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
+    },
+    descriptor_set::{
+        DescriptorSet, WriteDescriptorSet,
+        allocator::{
+            DescriptorSetAllocator, StandardDescriptorSetAllocator,
+            StandardDescriptorSetAllocatorCreateInfo,
+        },
     },
     device::{
-        self, Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo,
+        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo,
         physical::PhysicalDevice,
     },
     image::{Image, ImageUsage, view::ImageView},
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
+    memory::allocator::{
+        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
+    },
     pipeline::{
-        GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
+        GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         graphics::{
             GraphicsPipelineCreateInfo,
             color_blend::{ColorBlendAttachmentState, ColorBlendState},
@@ -45,25 +56,33 @@ use winit::{
 };
 
 mod error;
-pub use error::Result;
-
 use crate::error::ErrorLogger;
+pub use error::Result;
 mod shader;
 fn main() -> Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new().log()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::default();
+    event_loop.set_control_flow(ControlFlow::wait_duration(time::Duration::from_millis(
+        1000 / 144,
+    )));
+    let mut app = App::new();
     event_loop.run_app(&mut app).log()?;
     Ok(())
 }
 
-#[derive(Default)]
 struct App {
-    recreate_swapchain: bool,
-    window_resize: bool,
     window: Option<Arc<Window>>,
     renderer: Option<RendererContext>,
+    frame_interval: time::Duration,
+}
+impl App {
+    fn new() -> Self {
+        Self {
+            frame_interval: time::Duration::from_secs_f32(1. / 144.),
+            window: None,
+            renderer: None,
+        }
+    }
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -83,6 +102,7 @@ impl ApplicationHandler for App {
             .log()
             .unwrap();
 
+        window.request_redraw();
         self.window = Some(window);
         self.renderer = Some(render);
     }
@@ -100,19 +120,17 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(_) => {
                 log::info!("Resized");
-                self.window_resize = true;
+                self.renderer.as_mut().unwrap().window_resize = true;
             }
             WindowEvent::RedrawRequested => {
                 log::info!("Redraw requested");
                 self.renderer
                     .as_mut()
                     .unwrap()
-                    .update(
-                        self.window.as_ref().unwrap(),
-                        &mut self.recreate_swapchain,
-                        &mut self.window_resize,
-                    )
+                    .update(self.window.as_ref().unwrap())
                     .unwrap();
+                event_loop.set_control_flow(ControlFlow::wait_duration(self.frame_interval));
+                self.window.as_ref().unwrap().request_redraw();
             }
             _ => {}
         }
@@ -123,14 +141,18 @@ struct RendererContext {
     instance: Arc<Instance>,
     device: Arc<Device>,
     queue: Arc<Queue>,
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    command_buffer_allocator: Arc<dyn CommandBufferAllocator>,
+    descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
     render_pass: Arc<RenderPass>,
     swapchain: Arc<Swapchain>,
     framebuffers: Vec<Arc<Framebuffer>>,
     vertex_buffer: Subbuffer<[Vertex3D]>,
+    descriptor_sets: Vec<Arc<DescriptorSet>>,
+    uniform_buffers: Vec<Subbuffer<shader::vs::Data>>,
     viewport: Viewport,
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
-    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     command_buffers: Vec<Arc<PrimaryAutoCommandBuffer>>,
     fences: Vec<
         Option<
@@ -149,6 +171,12 @@ struct RendererContext {
         >,
     >,
     previous_fence_i: u32,
+    pub swapchain_recreate: bool,
+    pub window_resize: bool,
+    start_time: time::Instant,
+    world: Mat4,
+    view: Mat4,
+    proj: Mat4,
 }
 impl RendererContext {
     fn new_with(event_loop: &ActiveEventLoop, window: Arc<Window>) -> Result<Self> {
@@ -187,9 +215,9 @@ impl RendererContext {
         )
         .log()?;
 
-        let queue = queues.next().log().unwrap();
+        let queue = queues.next().log()?;
 
-        let (swapchain, images) = {
+        let (swapchain, images): (Arc<Swapchain>, Vec<Arc<Image>>) = {
             let caps = physical_device
                 .surface_capabilities(&surface, Default::default())
                 .log()?;
@@ -203,7 +231,7 @@ impl RendererContext {
                     swapchain::CompositeAlpha::PostMultiplied => true,
                     _ => false,
                 })
-                .unwrap();
+                .log()?;
             let image_format = physical_device
                 .surface_formats(&surface, Default::default())
                 .log()?[0]
@@ -243,7 +271,7 @@ impl RendererContext {
             },
             [
                 Vertex3D {
-                    position: [0.0, 1.0, 0.0],
+                    position: [0.0, 1.0, 2.0],
                 },
                 Vertex3D {
                     position: [-1.0, -1.0, 0.0],
@@ -251,13 +279,34 @@ impl RendererContext {
                 Vertex3D {
                     position: [1.0, -1.0, 0.0],
                 },
+                Vertex3D {
+                    position: [0.0, -2.0, 5.0],
+                },
             ],
         )
         .log()?;
-        let image_size = [1920, 1080, 1];
+
+        let uniform_buffers = (0..swapchain.image_count())
+            .map(|_| {
+                Buffer::new_sized(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::UNIFORM_BUFFER,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                            | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                )
+                .log()
+            })
+            .try_collect::<Vec<_>>()?;
+
         let viewport = Viewport {
             offset: [0.0, 0.0],
-            extent: [image_size[0] as f32, image_size[1] as f32],
+            extent: window.inner_size().into(),
             depth_range: 0.0..=1.0,
         };
 
@@ -273,43 +322,75 @@ impl RendererContext {
         )
         .log()?;
 
-        let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device.clone(),
-            Default::default(),
+            StandardDescriptorSetAllocatorCreateInfo {
+                ..Default::default()
+            },
         ));
+        let descriptor_set_layouts = pipeline.layout().set_layouts();
+        let descriptor_set_layout_index = 0;
+        let descriptor_set_layout = descriptor_set_layouts[descriptor_set_layout_index].clone();
+        let descriptor_sets = uniform_buffers
+            .iter()
+            .map(|buf| {
+                DescriptorSet::new(
+                    descriptor_set_allocator.clone(),
+                    descriptor_set_layout.clone(),
+                    [WriteDescriptorSet::buffer(0, buf.clone())], // 0 is the binding
+                    [],
+                )
+            })
+            .try_collect::<Vec<_>>()
+            .log()?;
+
+        let command_buffer_allocator: Arc<dyn CommandBufferAllocator> = Arc::new(
+            StandardCommandBufferAllocator::new(device.clone(), Default::default()),
+        );
         let command_buffers = Self::get_command_buffers(
             &command_buffer_allocator,
             &queue,
             &pipeline,
             &framebuffers,
             &vertex_buffer,
-        );
+            &descriptor_sets,
+        )?;
+
+        let view = Mat4::look_to_rh(vec3(0.0, -0.8, 2.0), vec3(0., 0., -1.), vec3(0., 1., 0.));
+        let aspect_ratio = swapchain.image_extent()[0] as f32 / swapchain.image_extent()[1] as f32;
+        let proj = Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_2, aspect_ratio, 0.01, 10.0);
 
         Ok(Self {
             instance,
             device,
             queue,
+            command_buffer_allocator,
+            memory_allocator,
+            descriptor_set_allocator,
             swapchain,
             render_pass,
             framebuffers,
+            descriptor_sets,
             vertex_buffer,
+            uniform_buffers,
             viewport,
             vs,
             fs,
-            command_buffer_allocator,
             command_buffers,
             fences: vec![None; images.len()],
             previous_fence_i: 0,
+            world: Mat4::IDENTITY,
+            view,
+            proj,
+            swapchain_recreate: false,
+            window_resize: false,
+            start_time: time::Instant::now(),
         })
     }
-    fn update(
-        &mut self,
-        window: &Arc<Window>,
-        swapchain_recreate: &mut bool,
-        winodw_resize: &mut bool,
-    ) -> Result<()> {
-        if *swapchain_recreate || *winodw_resize {
-            *swapchain_recreate = false;
+    fn update(&mut self, window: &Arc<Window>) -> Result<()> {
+        log::info!("update");
+        if self.swapchain_recreate || self.window_resize {
+            self.swapchain_recreate = false;
             let new_dimensions = window.inner_size();
 
             let (new_swapchain, new_images) = self
@@ -323,9 +404,18 @@ impl RendererContext {
             self.swapchain = new_swapchain;
             let new_framebuffers = Self::get_framebuffers(&new_images, self.render_pass.clone())?;
 
-            if *winodw_resize {
-                *winodw_resize = false;
+            if self.window_resize {
+                self.window_resize = false;
+
                 self.viewport.extent = new_dimensions.into();
+                let new_aspect_ratio = new_dimensions.width as f32 / new_dimensions.height as f32;
+                self.proj = Mat4::perspective_rh_gl(
+                    std::f32::consts::FRAC_PI_2,
+                    new_aspect_ratio,
+                    0.1,   // 近平面（避免模型被裁剪）
+                    100.0, // 远平面
+                );
+
                 let new_pipeline = Self::get_pipeline(
                     self.device.clone(),
                     self.vs.clone(),
@@ -333,74 +423,84 @@ impl RendererContext {
                     self.render_pass.clone(),
                     self.viewport.clone(),
                 )?;
+
                 self.command_buffers = Self::get_command_buffers(
                     &self.command_buffer_allocator,
                     &self.queue,
                     &new_pipeline,
                     &new_framebuffers,
                     &self.vertex_buffer,
-                );
+                    &self.descriptor_sets,
+                )?;
             }
-
-            let (image_i, suboptimal, acquire_future) =
-                match swapchain::acquire_next_image(self.swapchain.clone(), None)
-                    .map_err(Validated::unwrap)
-                {
-                    Ok(r) => r,
-                    Err(VulkanError::OutOfDate) => {
-                        *swapchain_recreate = true;
-                        return Ok(());
-                    }
-                    Err(e) => panic!("failed to acquire next image: {e}"),
-                };
-
-            if suboptimal {
-                *swapchain_recreate = true;
-            }
-            // wait for the fence related to this image to finish (normally this would be the oldest fence)
-            if let Some(image_fence) = &self.fences[image_i as usize] {
-                image_fence.wait(None).unwrap();
-            }
-
-            let previous_future = match self.fences[self.previous_fence_i as usize].clone() {
-                // Create a NowFuture
-                None => {
-                    let mut now = vulkano::sync::now(self.device.clone());
-                    now.cleanup_finished();
-
-                    now.boxed()
-                }
-                // Use the existing FenceSignalFuture
-                Some(fence) => fence.boxed(),
-            };
-
-            let future = previous_future
-                .join(acquire_future)
-                .then_execute(
-                    self.queue.clone(),
-                    self.command_buffers[image_i as usize].clone(),
-                )
-                .unwrap()
-                .then_swapchain_present(
-                    self.queue.clone(),
-                    SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_i),
-                )
-                .then_signal_fence_and_flush();
-
-            self.fences[image_i as usize] = match future.map_err(Validated::unwrap) {
-                Ok(value) => Some(Arc::new(value)),
-                Err(VulkanError::OutOfDate) => {
-                    *swapchain_recreate = true;
-                    None
-                }
-                Err(e) => {
-                    println!("failed to flush future: {e}");
-                    None
-                }
-            };
-
-            self.previous_fence_i = image_i;
         }
+        let elapsed = self.start_time.elapsed().as_secs_f32();
+        self.world = Mat4::from_rotation_y(elapsed * 2.0);
+
+        let (image_i, suboptimal, acquire_future) =
+            match swapchain::acquire_next_image(self.swapchain.clone(), None)
+                .map_err(Validated::unwrap)
+            {
+                Ok(r) => r,
+                Err(VulkanError::OutOfDate) => {
+                    self.swapchain_recreate = true;
+                    return Ok(());
+                }
+                Err(e) => panic!("failed to acquire next image: {e}"),
+            };
+
+        if suboptimal {
+            self.swapchain_recreate = true;
+        }
+        // wait for the fence related to this image to finish (normally this would be the oldest fence)
+        if let Some(image_fence) = &self.fences[image_i as usize] {
+            image_fence.wait(None).log()?;
+        }
+
+        let previous_future = match self.fences[self.previous_fence_i as usize].clone() {
+            // Create a NowFuture
+            None => {
+                let mut now = vulkano::sync::now(self.device.clone());
+                now.cleanup_finished();
+
+                now.boxed()
+            }
+            // Use the existing FenceSignalFuture
+            Some(fence) => fence.boxed(),
+        };
+
+        let uniform_buffer = &mut self.uniform_buffers[image_i as usize];
+        *uniform_buffer.write()? = shader::vs::Data {
+            world: self.world.to_cols_array_2d(),
+            view: self.view.to_cols_array_2d(),
+            proj: self.proj.to_cols_array_2d(),
+        };
+
+        let future = previous_future
+            .join(acquire_future)
+            .then_execute(
+                self.queue.clone(),
+                self.command_buffers[image_i as usize].clone(),
+            )
+            .log()?
+            .then_swapchain_present(
+                self.queue.clone(),
+                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_i),
+            )
+            .then_signal_fence_and_flush();
+
+        self.fences[image_i as usize] = match future.map_err(Validated::unwrap) {
+            Ok(value) => Some(Arc::new(value)),
+            Err(VulkanError::OutOfDate) => {
+                self.swapchain_recreate = true;
+                None
+            }
+            Err(e) => {
+                println!("failed to flush future: {e}");
+                None
+            }
+        };
+        self.previous_fence_i = image_i;
         Ok(())
     }
 
@@ -463,7 +563,7 @@ impl RendererContext {
         images
             .iter()
             .map(|image| {
-                let view = ImageView::new_default(image.clone()).unwrap();
+                let view = ImageView::new_default(image.clone()).log()?;
                 Framebuffer::new(
                     render_pass.clone(),
                     FramebufferCreateInfo {
@@ -487,7 +587,7 @@ impl RendererContext {
         let vs = vs.entry_point("main").log()?;
         let fs = fs.entry_point("main").log()?;
 
-        let vertex_input_state = Vertex3D::per_vertex().definition(&vs).unwrap();
+        let vertex_input_state = Vertex3D::per_vertex().definition(&vs).log()?;
 
         let stages = [
             PipelineShaderStageCreateInfo::new(vs),
@@ -533,15 +633,17 @@ impl RendererContext {
     }
 
     fn get_command_buffers(
-        command_buffer_allocator: &Arc<StandardCommandBufferAllocator>,
-        queue: &Arc<device::Queue>,
+        command_buffer_allocator: &Arc<dyn CommandBufferAllocator>,
+        queue: &Arc<Queue>,
         pipeline: &Arc<GraphicsPipeline>,
         framebuffers: &[Arc<Framebuffer>],
         vertex_buffer: &Subbuffer<[Vertex3D]>,
-    ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
+        descriptor_sets: &[Arc<DescriptorSet>],
+    ) -> Result<Vec<Arc<PrimaryAutoCommandBuffer>>> {
         framebuffers
             .iter()
-            .map(|framebuffer| {
+            .zip(descriptor_sets.iter())
+            .map(|(framebuffer, descriptor_set)| {
                 let mut builder = AutoCommandBufferBuilder::primary(
                     command_buffer_allocator.clone(),
                     queue.queue_family_index(),
@@ -560,20 +662,22 @@ impl RendererContext {
                                 contents: SubpassContents::Inline,
                                 ..Default::default()
                             },
-                        )
-                        .unwrap()
-                        .bind_pipeline_graphics(pipeline.clone())
-                        .unwrap()
-                        .bind_vertex_buffers(0, vertex_buffer.clone())
-                        .unwrap()
-                        .draw(vertex_buffer.len() as u32, 1, 0, 0)
-                        .unwrap()
-                        .end_render_pass(Default::default())
-                        .unwrap()
+                        )?
+                        .bind_pipeline_graphics(pipeline.clone())?
+                        .bind_vertex_buffers(0, vertex_buffer.clone())?
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            pipeline.layout().clone(),
+                            0,
+                            descriptor_set.clone(),
+                        )?
+                        .draw(vertex_buffer.len() as u32, 1, 0, 0)?
+                        .end_render_pass(Default::default())?
                 };
-                builder.build().unwrap()
+                builder.build()
             })
-            .collect()
+            .try_collect()
+            .log()
     }
 }
 
