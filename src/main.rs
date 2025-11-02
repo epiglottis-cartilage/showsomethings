@@ -254,12 +254,21 @@ impl RendererContext {
             let composite_alpha = caps
                 .supported_composite_alpha
                 .into_iter()
-                .find(|&alpha| match alpha {
-                    swapchain::CompositeAlpha::PreMultiplied => true,
-                    swapchain::CompositeAlpha::PostMultiplied => true,
-                    _ => false,
+                .map(|alpha| {
+                    (
+                        match alpha {
+                            swapchain::CompositeAlpha::Inherit => false,
+                            swapchain::CompositeAlpha::Opaque => false,
+                            swapchain::CompositeAlpha::PreMultiplied => true,
+                            swapchain::CompositeAlpha::PostMultiplied => true,
+                            _ => unreachable!(),
+                        },
+                        alpha,
+                    )
                 })
-                .log()?;
+                .max_by_key(|(s, _)| *s)
+                .unwrap()
+                .1;
             let image_format = physical_device
                 .surface_formats(&surface, Default::default())
                 .log()?[0]
