@@ -64,6 +64,7 @@ use winit::{
 mod error;
 use crate::error::ErrorLogger;
 pub use error::Result;
+mod model;
 mod shader;
 fn main() -> Result<()> {
     env_logger::init();
@@ -575,19 +576,31 @@ impl RendererContext {
     }
 
     fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain>) -> Result<Arc<RenderPass>> {
+        let depth_format = Format::D32_SFLOAT;
+
         vulkano::single_pass_renderpass!(
             device,
             attachments: {
+                // 颜色附件（交换链图像）
                 color: {
-                    format: swapchain.image_format(), // set the format the same as the swapchain
+                    format: swapchain.image_format(),
                     samples: 1,
-                    load_op: Clear,
-                    store_op: Store,
+                    load_op: Clear,    // 渲染前清空颜色缓冲
+                    store_op: Store,   // 渲染后保存颜色缓冲（用于呈现）
                 },
+                // 深度附件（深度缓冲）
+                depth: {
+                    format: depth_format,  // 深度格式
+                    samples: 1,
+                    load_op: Clear,        // 渲染前清空深度缓冲（初始化为最大值）
+                    store_op: DontCare,    // 渲染后不需要保存深度缓冲（可优化性能）
+                    stencil_load_op: DontCare,
+                    stencil_store_op: DontCare,
+                }
             },
             pass: {
-                color: [color],
-                depth_stencil: {},
+                color: [color],          // 颜色附件关联到渲染通道
+                depth_stencil: { depth } // 深度附件关联到渲染通道
             },
         )
         .log()
